@@ -1,1 +1,3 @@
-bn_keys
+.vscode
+.ipynb_checkpoints
+semeval/
