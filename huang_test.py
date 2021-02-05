@@ -1,3 +1,0 @@
-import huang
-
-huang.huang()
