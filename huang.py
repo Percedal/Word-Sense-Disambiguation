@@ -5,9 +5,7 @@ from gensim.models import Word2Vec
 from nltk.cluster import KMeansClusterer, cosine_distance
 
 class Huang:
-    """
-    TODO
-    """
+    """TODO"""
 
     def __init__(self, vector_size=100, ctx_window=11, seed=random.randrange(1e9)):
         """
@@ -23,52 +21,90 @@ class Huang:
         self._vector_size = vector_size
         self.ctx_window = ctx_window
         self.seed = seed
-        self._w2v = None
         self._wv = {}
+        self._senses = {}
 
     def __call__(self, sentences, senses_dict):
-        """Call to the function huang(sentences, senses_dict)
+        """Call to the function ``self.huang()``
         
         See Also
         --------
-        huang
+        Huang.huang()
         """
         self.huang(sentences, senses_dict)
     
-    def __computeContextVector(self, window):
-        """Compute a context vector"""
-        return np.sum([self._w2v.wv[word] for word in window], axis=0)
+    def extractWindow(self, sentence, pos):
+        """Extract a sub-sequence (window) from a list.
+        Size of the extract window is define by ``self.ctx_window``.
+        
+        Parameters
+        ----------
+        sentence: list
+            List of elements.
+        pos: int
+            Index in the list. Center of the extraction window.
+
+        Returns
+        -------
+        list
+            Return a list of words contains in the given sentence from ``start`` to ``end``.
+        """
+        start = pos - math.ceil((self.ctx_window - 1) / 2)
+        end = pos + math.floor((self.ctx_window - 1) / 2)
+        return sentence[max(0, start) : min(len(sentence), end)+1]
     
-    def __getitem__(self, item):
-        """Get the embedding of the given item.
+    def __getitem__(self, word):
+        """Get the embedding of a given word. Thie method does not disambiguate.
 
         Parameters
         ----------
-        item: str
+        word: str
             The word to be represented as a vector.
 
         Returns
         -------
         list
             A list that is a vectorial reprensentation of the word.
+            If the word as multiple senses, return a list of vectors
         
         """
-        if item in self._wv:
-            return self._wv[item]
-            #TODO -> Retourner un seul vecteur (suivant le contexte d'apparition)
-        return self._w2v.wv[item]
+        if word in self._senses:
+            return self._senses[word]
+        return self._wv[word]
 
-    # def getWordVector(self, word, context):
-    #     """
-    #     TODO -> docstring
-    #     """
-    #     #BUG -> pb quand w2v ne connais pas un mot...
-    #     ctx_vec = self.__computeContextVector(context)
+    def getWordVector(self, word, sentence):
+        """Get the embedding of a given word.
+        For polysemous words, return the embedding that represent the word in the given context ``sentence``.
+
+        Parameters
+        ----------
+        word: int
+            The word to be represented as a vector.
+        sentence: list
+            A context sentence in which the word appear. Tokenized sentence, list of string.
         
-    #     nearest = []
-    #     dist = -1
-    #     for vec in self._wv[word]:
-    #         print(cosine_distance(ctx_vec, vec)) 
+        Returns
+        -------
+        list
+            Integer array, embedding representation of the word
+        """
+        #TODO -> lors du calcul du vecteur de ctx, des mots polysemiques peuvent y apparaitre
+        # cependant, ceux ne disposent pas d'un embedding unique (utilisé dans la phase d'apprentissage)
+        # mais de plusieurs (on est dans la phase apres apprentissage). Il faut definir un embeddging pour les mots polysémiques
+        # afin de calculer le vecteur de context.
+        # solution -> moyenne des embeddings de sens
+        if not word in self._senses:
+            return self._wv[word]
+
+        res = []
+        for idx in self.__getListIndices(sentence, word):
+            ctx_vec = self.__computeContextVector(self._wv, self.extractWindow(sentence, idx))
+            _,ms = self.__mostSimilare(ctx_vec, self._senses[word])
+            res.append(ms)
+
+        if len(res) == 1:
+            return res[0]
+        return res
 
     def huang(self, sentences, senses_dict):
         """Huang & al. algorithm for Word Sens Disambiguation.
@@ -92,10 +128,10 @@ class Huang:
         """
         
         #Learn the w2v embeddings
-        self._w2v = Word2Vec(sentences=sentences,
-                             size=self.vector_size,
-                             min_count=1,
-                             seed=self.seed)
+        w2v = Word2Vec(sentences=sentences,
+                       size=self._vector_size,
+                       min_count=1,
+                       seed=self.seed)
 
         #compute the context vectors
         for lemma, nsenses in senses_dict.items():
@@ -104,9 +140,10 @@ class Huang:
                 for idx in self.__getListIndices(sentence, lemma):
                     mean_vectors.append(
                         self.__computeContextVector(
-                            self.extractWindow( sentence, 
-                                                idx - math.floor((self.ctx_window - 1) / 2),
-                                                idx + math.ceil((self.ctx_window - 1) / 2))))
+                            w2v.wv,
+                            self.extractWindow(sentence, idx)
+                        )
+                    )
              
             skm = KMeansClusterer(  nsenses,
                                     cosine_distance,
@@ -116,7 +153,7 @@ class Huang:
             
             clustering = skm.cluster(mean_vectors, True)
 
-        #reannote the corpus for new w2v embeddings learning, those embeddings are our final ones
+        #reannotate the corpus for new w2v embeddings learning, those embeddings are our final ones
         #TODO -> la réannotation modifie le corpus original donné en param, voir si ca peu poser pb (sinon faire une corpie de ce corpus)...
         for lemma, _ in senses_dict.items():
             idx = 0
@@ -125,31 +162,68 @@ class Huang:
                     if sentences[i_s][i_w] == lemma:
                         sentences[i_s][i_w] = lemma + "#" + str(clustering[idx])
                         idx += 1
-        self._w2v = Word2Vec(sentences=sentences,
-                             size=self.vector_size,
-                             min_count=1,
-                             seed=self.seed)
+        w2v = Word2Vec(sentences=sentences,
+                       size=self._vector_size,
+                       min_count=1,
+                       seed=self.seed)
 
+        #copy w2v embeddings in attributes
+        for lemma in w2v.wv.vocab:
+            slemma = lemma.split("#")
+            if len(slemma) == 1:
+                self._wv[lemma] = w2v.wv[lemma]
+            else:
+                l = slemma[0]
+                if not l in self._senses:
+                    self._senses[l] = [w2v.wv[lemma]]
+                else:
+                    self._senses[l].append(w2v.wv[lemma])
+                    
+        #compute naif embeddings for polysemous words
         for lemma, nsenses in senses_dict.items():
-            self._wv[lemma] = []
-            for i in range(nsenses):
-                self._wv[lemma].append(self._w2v[lemma+"#"+str(i)])
+            self._wv[lemma] = np.mean(self._senses[lemma], axis=0)
     
-    @staticmethod
-    def extractWindow(sentence, start, end):
-        """Return the items in ``sentence`` between ``start`` and ``end``.
+    def polysemousVocab(self):
+        """Get the vocabulary of polysemous words/
+
         Returns
         -------
-        list
-            Return a list of words contains in the given sentence from ``start`` to ``end``.
+        dict_keys
+            Set of lemmas
         """
-        return sentence[max(0, start) : min(len(sentence), end)+1]
+        return self._senses.keys()
+
+    def vocab(self):
+        """Get the vocabulary (polysemous words included)
+        
+        Returns
+        -------
+        dict_keys
+            Set of lemmas
+        """
+        return self._wv.keys()
+    
+    @staticmethod
+    def __computeContextVector(wv, window):
+        """TODO"""
+        #TODO : changer la somme en moyenne (pour normaliser les vecteurs)
+        return np.sum([wv[word] for word in window], axis=0)
     
     @staticmethod
     def __getListIndices(lst, item):
+        """TODO"""
         for i in range(len(lst)):
             if lst[i] == item:
                 yield i
+    
+    @staticmethod
+    def __mostSimilare(vector, candidates):
+        """TODO"""
+        idx = 0
+        for i,c in enumerate(candidates):
+            if cosine_distance(vector, c) > cosine_distance(vector, candidates[idx]):
+                idx = i
+        return idx, candidates[idx]
 
 
 if __name__ == "__main__":
@@ -161,5 +235,7 @@ if __name__ == "__main__":
 
     h = Huang(vector_size=10, seed=10)
     h(corpus, polysems)
-    h.huang()
-    print(h["like"])
+    print(h.getWordVector("I", None))
+    print(h.getWordVector("like", ["I", "really", "like", "testing"]))
+    print(h.vocab())
+    print(h.polysemousVocab())
